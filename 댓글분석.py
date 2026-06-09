@@ -20,15 +20,15 @@ st.set_page_config(
 )
 
 st.title("📺 YouTube 댓글 분석기")
-st.markdown("유튜브 영상 URL만 입력하면 댓글을 수집하고 분석합니다.")
+st.markdown("유튜브 URL만 입력하면 댓글을 수집하고 분석합니다.")
 
 # -------------------------
-# URL 입력
+# 입력
 # -------------------------
 
 youtube_url = st.text_input(
     "🔗 유튜브 영상 URL 입력",
-    placeholder="https://www.youtube.com/watch?v=..."
+    placeholder="https://www.youtube.com/watch?v=xxxx"
 )
 
 comment_limit = st.slider(
@@ -40,7 +40,7 @@ comment_limit = st.slider(
 )
 
 # -------------------------
-# 댓글 수집 함수
+# 댓글 수집
 # -------------------------
 
 @st.cache_data(show_spinner=False)
@@ -51,6 +51,7 @@ def collect_comments(url, limit):
     comments = []
 
     try:
+
         generator = downloader.get_comments_from_url(
             url,
             sort_by=0
@@ -58,18 +59,38 @@ def collect_comments(url, limit):
 
         for idx, comment in enumerate(generator):
 
+            # 좋아요 숫자 변환
+            votes = comment.get("votes", 0)
+
+            try:
+                votes = str(votes).replace(",", "")
+
+                if "K" in votes:
+                    votes = float(votes.replace("K", "")) * 1000
+
+                elif "M" in votes:
+                    votes = float(votes.replace("M", "")) * 1000000
+
+                votes = int(float(votes))
+
+            except:
+                votes = 0
+
             comments.append({
                 "댓글": comment.get("text", ""),
-                "좋아요": comment.get("votes", 0),
+                "좋아요": votes,
                 "시간": comment.get("time", "")
             })
 
             if idx + 1 >= limit:
                 break
 
-        return pd.DataFrame(comments)
+        df = pd.DataFrame(comments)
+
+        return df
 
     except Exception as e:
+
         st.error(f"댓글 수집 실패: {e}")
         return pd.DataFrame()
 
@@ -79,7 +100,12 @@ def collect_comments(url, limit):
 
 def clean_text(text):
 
-    text = re.sub(r"[^가-힣a-zA-Z ]", " ", str(text))
+    text = re.sub(
+        r"[^가-힣a-zA-Z ]",
+        " ",
+        str(text)
+    )
+
     return text.lower()
 
 # -------------------------
@@ -88,7 +114,8 @@ def clean_text(text):
 
 if st.button("🚀 분석 시작"):
 
-    if youtube_url == "":
+    if not youtube_url:
+
         st.warning("유튜브 URL을 입력하세요.")
         st.stop()
 
@@ -100,13 +127,24 @@ if st.button("🚀 분석 시작"):
         )
 
     if len(df) == 0:
-        st.error("수집된 댓글이 없습니다.")
+
+        st.error("댓글을 가져오지 못했습니다.")
         st.stop()
+
+    # 좋아요 숫자형 보장
+    df["좋아요"] = pd.to_numeric(
+        df["좋아요"],
+        errors="coerce"
+    ).fillna(0)
+
+    # 빈 댓글 제거
+    df = df[df["댓글"].notna()]
+    df = df[df["댓글"] != ""]
 
     st.success(f"총 {len(df):,}개의 댓글 수집 완료")
 
     # -------------------------
-    # 데이터 보기
+    # 데이터 미리보기
     # -------------------------
 
     st.subheader("📄 댓글 데이터")
@@ -131,32 +169,39 @@ if st.button("🚀 분석 시작"):
 
     col2.metric(
         "평균 좋아요",
-        round(df["좋아요"].mean(), 2)
+        f"{df['좋아요'].mean():.2f}"
     )
 
     col3.metric(
         "최대 좋아요",
-        df["좋아요"].max()
+        int(df["좋아요"].max())
     )
 
     # -------------------------
-    # 좋아요 TOP 20
+    # 좋아요 TOP20
     # -------------------------
 
     st.subheader("👍 좋아요 많은 댓글 TOP 20")
 
-    top_like = df.sort_values(
-        "좋아요",
-        ascending=False
-    ).head(20)
+    top_like = (
+        df.sort_values(
+            by="좋아요",
+            ascending=False
+        )
+        .head(20)
+    )
 
     fig_like = px.bar(
         top_like,
         x="좋아요",
         y="댓글",
         orientation="h",
-        height=700,
-        title="좋아요 TOP 20 댓글"
+        title="좋아요 TOP 20 댓글",
+        height=700
+    )
+
+    fig_like.update_layout(
+        yaxis={"categoryorder": "total ascending"}
     )
 
     st.plotly_chart(
@@ -170,51 +215,54 @@ if st.button("🚀 분석 시작"):
 
     st.subheader("⏰ 댓글 시간대 분석")
 
-    def extract_hour(text):
+    def convert_time(text):
 
-        text = str(text)
+        text = str(text).lower()
 
-        match = re.search(r"(\d+)\s*hour", text)
-        if match:
-            return int(match.group(1))
+        if "minute" in text:
+            return "1시간 이내"
 
-        match = re.search(r"(\d+)\s*minute", text)
-        if match:
-            return 0
+        elif "hour" in text:
+            return "1일 이내"
 
-        match = re.search(r"(\d+)\s*day", text)
-        if match:
-            return 24
+        elif "day" in text:
+            return "1주 이내"
 
-        return None
+        elif "week" in text:
+            return "1개월 이내"
 
-    df["hour"] = df["시간"].apply(extract_hour)
+        elif "month" in text:
+            return "1년 이내"
+
+        elif "year" in text:
+            return "1년 이상"
+
+        return "기타"
+
+    df["구간"] = df["시간"].apply(convert_time)
 
     time_df = (
-        df["hour"]
+        df["구간"]
         .value_counts()
         .reset_index()
     )
 
     time_df.columns = [
-        "시간대",
+        "구간",
         "댓글 수"
     ]
 
-    if len(time_df) > 0:
+    fig_time = px.bar(
+        time_df,
+        x="구간",
+        y="댓글 수",
+        title="댓글 작성 시기 분포"
+    )
 
-        fig_time = px.line(
-            time_df.sort_values("시간대"),
-            x="시간대",
-            y="댓글 수",
-            markers=True,
-            title="시간대별 댓글 추이"
-        )
-
-        st.plotly_chart(
-            fig_time,
-            use_container_width=True
-        )
+    st.plotly_chart(
+        fig_time,
+        use_container_width=True
+    )
 
     # -------------------------
     # 단어 분석
@@ -222,19 +270,21 @@ if st.button("🚀 분석 시작"):
 
     st.subheader("🔥 자주 등장하는 단어")
 
-    text_data = " ".join(
+    text = " ".join(
         df["댓글"].astype(str)
     )
 
-    text_data = clean_text(text_data)
+    text = clean_text(text)
 
-    words = text_data.split()
+    words = text.split()
 
     stopwords = {
-        "the","and","is","to","of",
         "이","그","저","것","수","좀",
-        "진짜","너무","정말","ㅋㅋ","ㅎㅎ",
-        "영상","댓글","있는","하는","입니다"
+        "진짜","정말","너무","있는",
+        "하는","그리고","입니다",
+        "ㅋㅋ","ㅎㅎ","영상","댓글",
+        "the","and","for","that",
+        "with","this","you"
     }
 
     words = [
@@ -247,7 +297,7 @@ if st.button("🚀 분석 시작"):
 
     word_df = pd.DataFrame(
         counter.most_common(30),
-        columns=["단어", "빈도"]
+        columns=["단어","빈도"]
     )
 
     fig_word = px.bar(
@@ -271,21 +321,25 @@ if st.button("🚀 분석 시작"):
     if len(counter) > 0:
 
         try:
+
             wc = WordCloud(
-                width=1200,
-                height=600,
+                width=1400,
+                height=700,
                 background_color="white",
                 font_path="NanumGothic.ttf"
             ).generate_from_frequencies(counter)
 
         except:
+
             wc = WordCloud(
-                width=1200,
-                height=600,
+                width=1400,
+                height=700,
                 background_color="white"
             ).generate_from_frequencies(counter)
 
-        fig, ax = plt.subplots(figsize=(12,6))
+        fig, ax = plt.subplots(
+            figsize=(12, 6)
+        )
 
         ax.imshow(wc)
         ax.axis("off")
