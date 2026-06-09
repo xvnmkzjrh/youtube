@@ -1,0 +1,8 @@
+streamlit
+pandas
+numpy
+matplotlib
+plotly
+wordcloud
+youtube-comment-downloader
+konlpy
