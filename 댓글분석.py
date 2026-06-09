@@ -1,16 +1,18 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from collections import Counter
-from youtube_comment_downloader import YoutubeCommentDownloader
-from wordcloud import WordCloud
 import matplotlib.pyplot as plt
+
+from googleapiclient.discovery import build
+from collections import Counter
+from wordcloud import WordCloud
+
 import re
 import os
 
-# -------------------
-# 페이지 설정
-# -------------------
+# -----------------------
+# 설정
+# -----------------------
 
 st.set_page_config(
     page_title="유튜브 댓글 분석기",
@@ -20,156 +22,221 @@ st.set_page_config(
 
 st.title("📺 유튜브 댓글 분석기")
 
-# -------------------
-# 폰트 경로
-# -------------------
+API_KEY = st.secrets["YOUTUBE_API_KEY"]
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-FONT_PATH = os.path.join(BASE_DIR, "NanumGothic.ttf")
-
-# -------------------
-# 입력
-# -------------------
-
-youtube_url = st.text_input(
-    "유튜브 URL 입력",
-    placeholder="https://www.youtube.com/watch?v=xxxx"
+youtube = build(
+    "youtube",
+    "v3",
+    developerKey=API_KEY
 )
 
-comment_limit = st.slider(
-    "수집할 댓글 수",
-    min_value=10,
-    max_value=10000,
-    value=500,
-    step=10
+# -----------------------
+# 폰트
+# -----------------------
+
+BASE_DIR = os.path.dirname(
+    os.path.abspath(__file__)
 )
 
-# -------------------
+FONT_PATH = os.path.join(
+    BASE_DIR,
+    "NanumGothic.ttf"
+)
+
+# -----------------------
+# 영상 ID 추출
+# -----------------------
+
+def get_video_id(url):
+
+    patterns = [
+        r"v=([^&]+)",
+        r"youtu\.be/([^?]+)"
+    ]
+
+    for p in patterns:
+
+        m = re.search(p, url)
+
+        if m:
+            return m.group(1)
+
+    return None
+
+# -----------------------
+# 영상 정보
+# -----------------------
+
+def get_video_info(video_id):
+
+    response = youtube.videos().list(
+        part="snippet,statistics",
+        id=video_id
+    ).execute()
+
+    if not response["items"]:
+        return None
+
+    item = response["items"][0]
+
+    return {
+        "title": item["snippet"]["title"],
+        "channel": item["snippet"]["channelTitle"],
+        "views": int(
+            item["statistics"].get(
+                "viewCount", 0
+            )
+        ),
+        "likes": int(
+            item["statistics"].get(
+                "likeCount", 0
+            )
+        )
+    }
+
+# -----------------------
 # 댓글 수집
-# -------------------
+# -----------------------
 
 @st.cache_data
-def collect_comments(url, limit):
+def get_comments(video_id, limit):
 
-    downloader = YoutubeCommentDownloader()
     comments = []
 
-    try:
+    next_page = None
 
-        generator = downloader.get_comments_from_url(
-            url,
-            sort_by=0
-        )
+    while len(comments) < limit:
 
-        for idx, comment in enumerate(generator):
+        response = youtube.commentThreads().list(
+            part="snippet",
+            videoId=video_id,
+            maxResults=min(
+                100,
+                limit - len(comments)
+            ),
+            pageToken=next_page,
+            textFormat="plainText"
+        ).execute()
 
-            votes = comment.get("votes", 0)
+        for item in response["items"]:
 
-            try:
-
-                votes = str(votes).replace(",", "")
-
-                if "K" in votes:
-                    votes = int(float(votes.replace("K", "")) * 1000)
-
-                elif "M" in votes:
-                    votes = int(float(votes.replace("M", "")) * 1000000)
-
-                else:
-                    votes = int(float(votes))
-
-            except:
-                votes = 0
+            comment = item["snippet"][
+                "topLevelComment"
+            ]["snippet"]
 
             comments.append(
                 {
-                    "댓글": comment.get("text", ""),
-                    "좋아요": votes
+                    "댓글": comment["textDisplay"],
+                    "좋아요": comment["likeCount"],
+                    "작성일": comment["publishedAt"]
                 }
             )
 
-            if idx + 1 >= limit:
-                break
+        next_page = response.get(
+            "nextPageToken"
+        )
 
-        return pd.DataFrame(comments)
+        if not next_page:
+            break
 
-    except Exception as e:
+    return pd.DataFrame(comments)
 
-        st.error(f"댓글 수집 오류: {e}")
-        return pd.DataFrame()
+# -----------------------
+# 입력
+# -----------------------
 
-# -------------------
-# 분석 시작
-# -------------------
+url = st.text_input(
+    "유튜브 URL"
+)
 
-if st.button("🚀 분석 시작"):
+comment_limit = st.slider(
+    "댓글 수",
+    10,
+    10000,
+    500,
+    10
+)
 
-    if youtube_url == "":
+# -----------------------
+# 분석
+# -----------------------
 
-        st.warning("유튜브 URL을 입력하세요.")
+if st.button("분석 시작"):
+
+    video_id = get_video_id(url)
+
+    if not video_id:
+
+        st.error(
+            "유효한 URL이 아닙니다."
+        )
         st.stop()
 
-    with st.spinner("댓글 수집 중..."):
+    info = get_video_info(video_id)
 
-        df = collect_comments(
-            youtube_url,
+    if not info:
+
+        st.error(
+            "영상 정보를 가져올 수 없습니다."
+        )
+        st.stop()
+
+    st.subheader(info["title"])
+
+    c1, c2, c3 = st.columns(3)
+
+    c1.metric(
+        "조회수",
+        f"{info['views']:,}"
+    )
+
+    c2.metric(
+        "좋아요",
+        f"{info['likes']:,}"
+    )
+
+    c3.metric(
+        "채널",
+        info["channel"]
+    )
+
+    with st.spinner(
+        "댓글 수집 중..."
+    ):
+
+        df = get_comments(
+            video_id,
             comment_limit
         )
 
     if len(df) == 0:
 
-        st.error("댓글을 수집하지 못했습니다.")
+        st.error(
+            "댓글이 없습니다."
+        )
         st.stop()
 
-    # 숫자형 변환
-
-    df["좋아요"] = pd.to_numeric(
-        df["좋아요"],
-        errors="coerce"
-    ).fillna(0).astype(int)
-
     st.success(
-        f"{len(df):,}개의 댓글 수집 완료"
+        f"{len(df):,}개 댓글 수집 완료"
     )
 
     # -------------------
-    # 기본 통계
+    # 좋아요 TOP
     # -------------------
 
-    st.subheader("📊 기본 통계")
-
-    c1, c2, c3 = st.columns(3)
-
-    c1.metric(
-        "댓글 수",
-        f"{len(df):,}"
+    st.subheader(
+        "👍 좋아요 TOP 댓글"
     )
-
-    c2.metric(
-        "평균 좋아요",
-        round(df["좋아요"].mean(), 1)
-    )
-
-    c3.metric(
-        "최대 좋아요",
-        int(df["좋아요"].max())
-    )
-
-    # -------------------
-    # 좋아요 TOP10
-    # -------------------
-
-    st.subheader("👍 좋아요 TOP10 댓글")
 
     top_df = (
         df.sort_values(
-            by="좋아요",
+            "좋아요",
             ascending=False
         )
         .head(10)
     )
 
-    fig1 = px.bar(
+    fig = px.bar(
         top_df,
         x="좋아요",
         y="댓글",
@@ -178,7 +245,41 @@ if st.button("🚀 분석 시작"):
     )
 
     st.plotly_chart(
-        fig1,
+        fig,
+        use_container_width=True
+    )
+
+    # -------------------
+    # 날짜별 댓글
+    # -------------------
+
+    st.subheader(
+        "📈 댓글 추이"
+    )
+
+    df["작성일"] = pd.to_datetime(
+        df["작성일"]
+    )
+
+    trend = (
+        df.groupby(
+            df["작성일"].dt.date
+        )
+        .size()
+        .reset_index(
+            name="댓글 수"
+        )
+    )
+
+    fig2 = px.line(
+        trend,
+        x="작성일",
+        y="댓글 수",
+        markers=True
+    )
+
+    st.plotly_chart(
+        fig2,
         use_container_width=True
     )
 
@@ -186,7 +287,9 @@ if st.button("🚀 분석 시작"):
     # 단어 분석
     # -------------------
 
-    st.subheader("🔥 자주 등장한 단어")
+    st.subheader(
+        "🔥 인기 단어"
+    )
 
     text = " ".join(
         df["댓글"].astype(str)
@@ -205,111 +308,92 @@ if st.button("🚀 분석 시작"):
         "댓글",
         "있는",
         "하는",
-        "입니다",
         "그리고",
-        "그냥",
-        "ㅋㅋ",
-        "ㅎㅎ"
+        "입니다"
     }
 
     words = [
-        word
-        for word in words
-        if word not in stopwords
+        w for w in words
+        if w not in stopwords
     ]
 
     counter = Counter(words)
 
-    if len(counter) > 0:
+    word_df = pd.DataFrame(
+        counter.most_common(20),
+        columns=[
+            "단어",
+            "빈도"
+        ]
+    )
 
-        word_df = pd.DataFrame(
-            counter.most_common(20),
-            columns=["단어", "빈도"]
-        )
+    fig3 = px.bar(
+        word_df,
+        x="단어",
+        y="빈도"
+    )
 
-        fig2 = px.bar(
-            word_df,
-            x="단어",
-            y="빈도",
-            title="상위 20개 단어"
-        )
-
-        st.plotly_chart(
-            fig2,
-            use_container_width=True
-        )
+    st.plotly_chart(
+        fig3,
+        use_container_width=True
+    )
 
     # -------------------
     # 워드클라우드
     # -------------------
 
-    st.subheader("☁️ 워드클라우드")
+    st.subheader(
+        "☁️ 워드클라우드"
+    )
 
-    if len(counter) > 0:
+    try:
 
-        try:
+        wc = WordCloud(
+            font_path=FONT_PATH,
+            width=1400,
+            height=700,
+            background_color="white"
+        ).generate_from_frequencies(
+            counter
+        )
 
-            if not os.path.exists(FONT_PATH):
+        fig4, ax = plt.subplots(
+            figsize=(14, 7)
+        )
 
-                st.error(
-                    f"폰트를 찾을 수 없습니다.\n{FONT_PATH}"
-                )
+        ax.imshow(wc)
+        ax.axis("off")
 
-            else:
+        st.pyplot(fig4)
 
-                wc = WordCloud(
-                    font_path=FONT_PATH,
-                    width=1400,
-                    height=700,
-                    background_color="white",
-                    max_words=100
-                ).generate_from_frequencies(counter)
+    except Exception as e:
 
-                fig3, ax = plt.subplots(
-                    figsize=(14, 7)
-                )
-
-                ax.imshow(
-                    wc,
-                    interpolation="bilinear"
-                )
-
-                ax.axis("off")
-
-                st.pyplot(fig3)
-
-        except Exception as e:
-
-            st.error(
-                f"워드클라우드 생성 실패: {e}"
-            )
+        st.error(
+            f"워드클라우드 오류: {e}"
+        )
 
     # -------------------
-    # 댓글 데이터
+    # 데이터
     # -------------------
 
-    st.subheader("📄 댓글 데이터")
+    st.subheader(
+        "📄 댓글 데이터"
+    )
 
     st.dataframe(
-        df.head(1000),
+        df,
         use_container_width=True
     )
 
-    st.caption(
-        f"전체 {len(df):,}개 댓글 중 1000개만 표시"
-    )
-
-    # -------------------
-    # CSV 다운로드
-    # -------------------
-
     csv = df.to_csv(
         index=False
-    ).encode("utf-8-sig")
+    ).encode(
+        "utf-8-sig"
+    )
 
     st.download_button(
-        label="📥 CSV 다운로드",
-        data=csv,
-        file_name="youtube_comments.csv",
-        mime="text/csv"
+        "CSV 다운로드",
+        csv,
+        "youtube_comments.csv",
+        "text/csv"
     )
