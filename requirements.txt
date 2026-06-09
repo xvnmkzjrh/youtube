@@ -1,8 +1,6 @@
 streamlit
 pandas
-numpy
 plotly
 matplotlib
 wordcloud
-youtube-comment-downloader
-pillow
+google-api-python-client
